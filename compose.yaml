@@ -1,0 +1,77 @@
+# Umami: the blog's visitor statistics, at stats.<DOMAIN>, and its PostgreSQL. Setup: README.md.
+#
+#   cd /srv/umami
+#   cp .env.example .env   # then fill it in
+#   docker compose up -d
+#
+# Nothing here publishes a port. The server's Caddy (the edge stack in /srv/edge) reaches
+# umami over the shared "edge" network, with the site in caddy/Caddyfile. That network must
+# exist first (edge's README); Caddy itself needn't be running.
+
+name: umami
+
+x-logging: &logging
+  driver: local
+  options:
+    max-size: 10m
+    max-file: "5"
+
+services:
+  umami:
+    image: ghcr.io/umami-software/umami:3.4.1
+    environment:
+      DATABASE_URL: postgresql://umami:${UMAMI_DB_PASSWORD:?Set UMAMI_DB_PASSWORD in .env (openssl rand -hex 32)}@umami-db:5432/umami
+      APP_SECRET: ${UMAMI_APP_SECRET:?Set UMAMI_APP_SECRET in .env (openssl rand -hex 32)}
+      # Neutral names for the tracking script and its endpoint, which ad blockers' lists
+      # (script.js, /api/send) don't match. The blog's pages load these.
+      TRACKER_SCRIPT_NAME: pulse.js
+      COLLECT_API_ENDPOINT: /api/pulse
+      # The visitor's address is the one Caddy puts in X-Real-IP, replacing any the visitor sent.
+      CLIENT_IP_HEADER: x-real-ip
+      # Addresses whose visits aren't counted: comma-separated, empty by default.
+      IGNORE_IP: ${STATS_IGNORE_IPS:-}
+      # No call home, no update check, and the dashboard doesn't fetch site icons from
+      # another service (private mode).
+      DISABLE_TELEMETRY: "1"
+      DISABLE_UPDATES: "1"
+      PRIVATE_MODE: "1"
+    networks:
+      - default
+      - edge
+    depends_on:
+      umami-db:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *logging
+
+  # Only on Umami's own network: Caddy and the other apps can't reach it.
+  umami-db:
+    image: postgres:18.6-alpine3.24
+    environment:
+      POSTGRES_DB: umami
+      POSTGRES_USER: umami
+      # Used only when the volume is empty. After that the database keeps the password it was
+      # made with (README.md, "Changing .env").
+      POSTGRES_PASSWORD: ${UMAMI_DB_PASSWORD:?Set UMAMI_DB_PASSWORD in .env (openssl rand -hex 32)}
+    volumes:
+      # PostgreSQL 18's image keeps its data in a version folder below this one,
+      # so the volume goes at /var/lib/postgresql, not .../data.
+      - umami_db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U umami -d umami"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    logging: *logging
+
+networks:
+  default:
+  # Shared with Caddy and the other apps, and so are the names on it: no other app may
+  # put an "umami" there (edge's README).
+  edge:
+    external: true
+
+volumes:
+  # Every visit ever counted. Back it up with pg_dump (README.md), not by copying its files.
+  umami_db:

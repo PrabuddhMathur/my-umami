@@ -1,0 +1,49 @@
+# Umami's site, the blog's visitor statistics. The server's Caddy (the edge stack in /srv/edge)
+# mounts this folder at /sites/umami and imports this file; DOMAIN, HSTS_SECONDS and
+# ADMIN_ALLOWED_IPS come from its .env. umami is reached over the shared "edge" network.
+# After changing this file: "Day to day" in edge's README.
+#
+# Only the tracking script and the address the script posts visits to are public, because the
+# blog's pages load and call them from the visitors' browsers. Everything else, the dashboard
+# and its API, answers only the addresses in ADMIN_ALLOWED_IPS, like the Wagtail admin. The
+# subdomain needs its own DNS records and gets its own certificate.
+stats.{$DOMAIN} {
+	encode zstd gzip
+
+	# The same security headers as the blog, set the same way (its docker/Caddyfile says why).
+	header Strict-Transport-Security "max-age={$HSTS_SECONDS:3600}"
+	header ?X-Content-Type-Options "nosniff"
+	header ?X-Frame-Options "SAMEORIGIN"
+	header ?Referrer-Policy "strict-origin-when-cross-origin"
+	header ?Content-Security-Policy "frame-ancestors 'self'; base-uri 'self'; object-src 'none'; form-action 'self'"
+	header -X-Powered-By
+
+	# A visit is a few hundred bytes of JSON; the dashboard posts nothing bigger than a form.
+	request_body {
+		max_size 64KB
+	}
+
+	# Public: GET /pulse.js, and POST /api/pulse with the OPTIONS check browsers make first,
+	# because the blog posts to this other address. Anything else, from an address not in
+	# ADMIN_ALLOWED_IPS, is "not found". With Tailscale: ADMIN_ALLOWED_IPS=100.64.0.0/10
+	# fd7a:115c:a1e0::/48 (the blog's docs/admin-access.md).
+	@private {
+		not {
+			method GET HEAD
+			path /pulse.js
+		}
+		not {
+			method POST OPTIONS
+			path /api/pulse
+		}
+		not remote_ip {$ADMIN_ALLOWED_IPS:0.0.0.0/0 ::/0}
+	}
+	respond @private 404
+
+	# Umami counts the visitor's address as the one in X-Real-IP (CLIENT_IP_HEADER in
+	# compose.yaml), so it is replaced here with the one Caddy sees, never the one the visitor sent.
+	reverse_proxy umami:3000 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+	}
+}
